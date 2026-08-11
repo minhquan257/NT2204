@@ -1,0 +1,32 @@
+{
+  "Comment": "Cloud baseline: orchestration through AWS Step Functions",
+  "StartAt": "DetectObjects",
+  "States": {
+    "DetectObjects": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${DetectLambdaArn}",
+        "Payload.$": "$"
+      },
+      "OutputPath": "$.Payload",
+      "Next": "CreateAlert",
+      "Retry": [{
+        "ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException"],
+        "IntervalSeconds": 1,
+        "MaxAttempts": 2,
+        "BackoffRate": 2
+      }]
+    },
+    "CreateAlert": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${AlertLambdaArn}",
+        "Payload.$": "$"
+      },
+      "OutputPath": "$.Payload",
+      "End": true
+    }
+  }
+}

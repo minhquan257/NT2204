@@ -1,0 +1,86 @@
+# macOS / Windows
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments
+.venv/
+.venv-*/
+venv/
+env/
+ENV/
+
+# Packaging / build output
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# IDE and editor settings
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+credentials*
+secrets*
+
+# AWS / infrastructure local state
+.aws-sam/
+.terraform/
+*.tfstate
+*.tfstate.*
+cdk.out/
+
+# Downloaded ML models and framework caches
+*.pt
+*.pth
+*.onnx
+*.engine
+.ultralytics/
+.matplotlib/
+
+# Reproducible benchmark output
+results/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+.cache/
+
+# LaTeX build output (keep source .tex/.bib and report images)
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.lof
+*.lot
+*.out
+*.run.xml
+*.synctex.gz
+*.toc

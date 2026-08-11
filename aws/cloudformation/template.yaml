@@ -1,0 +1,198 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: NT2204 AWS YOLOv8n demo - container Lambda, Step Functions and CloudWatch
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: nt2204-edge-chain
+    AllowedPattern: '[a-z0-9-]+'
+  DetectImageUri:
+    Type: String
+    Description: ECR image URI for the YOLOv8n Lambda Detect container
+
+Resources:
+  ImageBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteDemoInputs
+            Status: Enabled
+            ExpirationInDays: 1
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: demo-runtime
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+                Resource: '*'
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${ImageBucket.Arn}/*'
+
+  YoloDetectFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-detect-yolo'
+      PackageType: Image
+      Architectures: [arm64]
+      Role: !GetAtt LambdaRole.Arn
+      MemorySize: 3008
+      Timeout: 120
+      EphemeralStorage:
+        Size: 1024
+      Environment:
+        Variables:
+          METRIC_NAMESPACE: NT2204/EdgeChain
+          MODEL_PATH: /var/task/yolov8n.pt
+          MODEL_IMAGE_SIZE: '640'
+          MODEL_CONFIDENCE: '0.25'
+          MODEL_DEVICE: cpu
+      Code:
+        ImageUri: !Ref DetectImageUri
+
+  AlertFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-alert'
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LambdaRole.Arn
+      MemorySize: 128
+      Timeout: 10
+      Environment:
+        Variables:
+          METRIC_NAMESPACE: NT2204/EdgeChain
+      Code:
+        ZipFile: |
+          import json, os, time
+          NS = os.environ.get("METRIC_NAMESPACE", "NT2204/EdgeChain")
+          def metrics(values, request_id):
+              definitions=[{"Name":k,"Unit":"Milliseconds"} for k in values]
+              doc={"_aws":{"Timestamp":int(time.time()*1000),"CloudWatchMetrics":[{"Namespace":NS,"Dimensions":[["Mode"]],"Metrics":definitions}]},"Mode":"Cloud","RequestId":request_id}
+              doc.update(values); print(json.dumps(doc))
+          def handler(event, context):
+              started=time.perf_counter()
+              intrusion=any(x["label"]=="person" and x["confidence"]>=0.60 for x in event["detections"])
+              alert_ms=(time.perf_counter()-started)*1000
+              e2e_ms=time.time()*1000-float(event["started_at_ms"])
+              metrics({"AlertLatency":alert_ms,"CloudE2ELatency":e2e_ms},event["request_id"])
+              return {"request_id":event["request_id"],"detector":event.get("detector","unknown"),"detection_count":len(event["detections"]),"intrusion":intrusion,"message":"INTRUSION_DETECTED" if intrusion else "SAFE","cloud_e2e_ms":e2e_ms,"detect_latency_ms":event.get("detect_latency_ms"),"inference_latency_ms":event.get("inference_latency_ms")}
+
+  WorkflowLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/states/${ProjectName}'
+      RetentionInDays: 7
+
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: states.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: invoke-and-log
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: [!GetAtt YoloDetectFunction.Arn, !GetAtt AlertFunction.Arn]
+              - Effect: Allow
+                Action: [logs:CreateLogDelivery, logs:GetLogDelivery, logs:UpdateLogDelivery, logs:DeleteLogDelivery, logs:ListLogDeliveries, logs:PutResourcePolicy, logs:DescribeResourcePolicies, logs:DescribeLogGroups]
+                Resource: '*'
+
+  Workflow:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${ProjectName}-cloud-baseline'
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      LoggingConfiguration:
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt WorkflowLogGroup.Arn
+        IncludeExecutionData: true
+        Level: ALL
+      DefinitionSubstitutions:
+        DetectArn: !GetAtt YoloDetectFunction.Arn
+        AlertArn: !GetAtt AlertFunction.Arn
+      DefinitionString: |
+        {
+          "Comment":"NT2204 Cloud baseline",
+          "StartAt":"DetectObjects",
+          "States":{
+            "DetectObjects":{
+              "Type":"Task",
+              "Resource":"arn:aws:states:::lambda:invoke",
+              "Parameters":{"FunctionName":"${DetectArn}","Payload.$":"$"},
+              "OutputPath":"$.Payload",
+              "Next":"CreateAlert",
+              "Retry":[{"ErrorEquals":["Lambda.ServiceException","Lambda.TooManyRequestsException"],"IntervalSeconds":1,"MaxAttempts":2,"BackoffRate":2}]
+            },
+            "CreateAlert":{
+              "Type":"Task",
+              "Resource":"arn:aws:states:::lambda:invoke",
+              "Parameters":{"FunctionName":"${AlertArn}","Payload.$":"$"},
+              "OutputPath":"$.Payload",
+              "End":true
+            }
+          }
+        }
+
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${ProjectName}-dashboard'
+      DashboardBody: !Sub |
+        {"widgets":[
+          {"type":"text","x":0,"y":0,"width":24,"height":2,"properties":{"markdown":"# NT2204 YOLOv8n Cloud Baseline\nReal YOLOv8n inference in Lambda container, orchestrated by Step Functions."}},
+          {"type":"metric","x":0,"y":2,"width":12,"height":6,"properties":{"region":"${AWS::Region}","title":"Cloud E2E Latency","view":"timeSeries","stat":"p95","period":60,"metrics":[["NT2204/EdgeChain","CloudE2ELatency","Mode","Cloud"]]}},
+          {"type":"metric","x":12,"y":2,"width":12,"height":6,"properties":{"region":"${AWS::Region}","title":"Function stage latency","view":"timeSeries","stat":"Average","period":60,"metrics":[["NT2204/EdgeChain","DetectLatency","Mode","Cloud"],[".","AlertLatency",".","."]]}},
+          {"type":"metric","x":0,"y":8,"width":12,"height":6,"properties":{"region":"${AWS::Region}","title":"Step Functions executions","view":"timeSeries","stat":"Sum","period":60,"metrics":[["AWS/States","ExecutionsSucceeded","StateMachineArn","${Workflow}"],[".","ExecutionsFailed",".","."]]}},
+          {"type":"metric","x":12,"y":8,"width":12,"height":6,"properties":{"region":"${AWS::Region}","title":"Lambda duration","view":"timeSeries","stat":"Average","period":60,"metrics":[["AWS/Lambda","Duration","FunctionName","${YoloDetectFunction}"],[".","Duration",".","${AlertFunction}"]]}},
+          {"type":"metric","x":0,"y":14,"width":12,"height":6,"properties":{"region":"${AWS::Region}","title":"YOLOv8n inference and S3 download","view":"timeSeries","stat":"Average","period":60,"metrics":[["NT2204/EdgeChain","ModelInferenceLatency","Mode","Cloud"],[".","ImageDownloadLatency",".","."]]}},
+          {"type":"metric","x":12,"y":14,"width":12,"height":6,"properties":{"region":"${AWS::Region}","title":"YOLOv8n cold model load","view":"timeSeries","stat":"Maximum","period":60,"metrics":[["NT2204/EdgeChain","ModelLoadLatency","Mode","Cloud"]]}}
+        ]}
+
+Outputs:
+  BucketName:
+    Value: !Ref ImageBucket
+  StateMachineArn:
+    Value: !Ref Workflow
+  DetectFunctionName:
+    Value: !Ref YoloDetectFunction
+  DetectImageUri:
+    Value: !Ref DetectImageUri
+  DashboardName:
+    Value: !Ref Dashboard
+  StepFunctionsConsole:
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/states/home?region=${AWS::Region}#/statemachines/view/${Workflow}'
+  DashboardConsole:
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards/dashboard/${Dashboard}'

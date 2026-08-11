@@ -1,95 +1,153 @@
-# Demo: tối ưu độ trễ chuỗi hàm AI thị giác tại Edge
+# NT2204 - Edge và Cloud AI Function Chain
 
-Demo so sánh cùng một chuỗi `Detect -> Alert` theo hai đường điều phối:
+Hệ thống so sánh độ trễ của cùng một chuỗi xử lý ảnh `Detect -> Alert` khi chạy
+tại Edge và qua Cloud orchestration:
 
 ```text
-Cloud: Image -> upload/JSON -> Step Functions -> Detect -> state handoff -> Alert
-Edge : Image -> LocalOrchestrator -> Detect -------- direct call --------> Alert
+Cloud: Image -> upload/JSON -> Step Functions -> Detect -> Alert
+Edge : Image -> LocalOrchestrator -> Detect -> gọi trực tiếp -> Alert
 ```
 
-Chế độ mặc định là mô phỏng có kiểm soát, chạy hoàn toàn offline và không cần tài
-khoản AWS. Mục tiêu là trình diễn/đo **chi phí điều phối**, không tuyên bố độ chính
-xác của YOLO. Thư mục `aws/` chứa các artifact tham khảo để triển khai thật.
+Chế độ mặc định là mô phỏng offline, không cần tài khoản AWS và không cần cài thư
+viện ngoài. Chế độ YOLOv8 thực hiện suy luận thật; thư mục `aws/` chứa mã triển
+khai baseline lên AWS Lambda, Step Functions, S3 và CloudWatch.
 
-## Chạy nhanh
+## Yêu cầu
 
-Yêu cầu Python 3.10+ và không cần cài package ngoài:
+- Python 3.10 trở lên;
+- ảnh đầu vào trong `sample_images/`;
+- tùy chọn: Ultralytics/PyTorch để chạy YOLOv8;
+- tùy chọn: AWS CLI, Docker và tài khoản AWS để triển khai Cloud.
+
+Luôn chạy lệnh tại thư mục gốc của dự án.
+
+## 1. Chạy nhanh bản mô phỏng offline
+
+Không cần tạo môi trường ảo hay cài dependency:
 
 ```bash
-python3 -m edge_demo.cli benchmark --images sample_images --requests 60 --rate 10
+python3 -m edge_demo.cli benchmark \
+  --images sample_images \
+  --requests 60 \
+  --rate 10 \
+  --output results
+```
+
+Xem lại thống kê từ file CSV:
+
+```bash
 python3 -m edge_demo.cli summarize results/latest.csv
 ```
 
-Kết quả gồm:
+Sau khi benchmark hoàn tất, thư mục output có:
 
-- `results/latest.csv`: từng request, latency, trạng thái, byte mạng ước tính;
-- `results/summary.json`: p50/p95/p99, throughput, success rate, CPU/RAM;
-- `results/report.html`: biểu đồ mở trực tiếp bằng trình duyệt.
+- `latest.csv`: dữ liệu của từng request;
+- `summary.json`: p50/p95/p99, throughput, success rate và tài nguyên;
+- `report.html`: báo cáo trực quan, có thể mở trực tiếp bằng trình duyệt.
 
-Chạy kiểm thử:
+Các tham số hữu ích:
+
+```bash
+python3 -m edge_demo.cli benchmark --help
+```
+
+## 2. Chạy kiểm thử
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-## Demo khi thuyết trình (3–5 phút)
+## 3. Chạy YOLOv8 thật tại máy local
 
-1. Mở sơ đồ trong `report/BAO_CAO_DEMO.md`, giải thích BA6/BA7 và IC4 của bài báo.
-2. Chạy benchmark ở 5 request/s, sau đó 10 và 20 request/s.
-3. Mở `results/report.html`, so sánh p50/p95 và Network I/O.
-4. Mở một dòng CSV để chứng minh `request_id` xuất hiện đúng một lần ở mỗi mode.
-5. Nêu rõ số liệu mô phỏng chỉ kiểm chứng giả thuyết; số liệu kết luận phải lấy từ
-   phần cứng/mạng AWS thật và lặp ít nhất 30 lần cho mỗi cấu hình.
-
-## Dùng YOLOv8 thật
-
-Demo mặc định dùng detector tất định. Để chạy suy luận YOLOv8n thật trong môi
-trường riêng (phù hợp cả khi Python mặc định của máy quá mới cho PyTorch):
+Nên dùng môi trường ảo riêng. Nếu Python mặc định quá mới và PyTorch chưa hỗ trợ,
+hãy thay `python3` bằng một bản Python 3.10-3.12 có trên máy.
 
 ```bash
-/usr/bin/python3 -m venv .venv-yolo
+python3 -m venv .venv-yolo
 .venv-yolo/bin/python -m pip install --upgrade pip setuptools wheel
-.venv-yolo/bin/python -m pip install ultralytics
+.venv-yolo/bin/python -m pip install -r aws/lambda_detect_yolo/requirements.txt
+```
 
+Chạy thử với YOLOv8n:
+
+```bash
 YOLO_CONFIG_DIR=results/.ultralytics \
 MPLCONFIGDIR=results/.matplotlib \
 .venv-yolo/bin/python -m edge_demo.cli benchmark \
-  --images sample_images --requests 30 --rate 2 --workers 4 \
-  --detector yolo --model yolov8n.pt --device cpu --imgsz 640 \
-  --confidence 0.25 --warmup 3 --output results/yolo_pilot
+  --images sample_images \
+  --requests 30 \
+  --rate 2 \
+  --workers 4 \
+  --detector yolo \
+  --model yolov8n.pt \
+  --device cpu \
+  --imgsz 640 \
+  --confidence 0.25 \
+  --warmup 3 \
+  --output results/yolo_pilot
 ```
 
-`--warmup 3` loại ba lần suy luận khởi động của mỗi mode khỏi tập đo. Chương trình
-chỉ đọc các định dạng ảnh hỗ trợ và bỏ qua PDF, `.DS_Store`. Cấu hình mô hình,
-device, kích thước đầu vào và tải được ghi trong `summary.json`.
+Nếu chưa có `yolov8n.pt`, Ultralytics sẽ tải model ở lần chạy đầu. Model và kết
+quả benchmark được `.gitignore` loại khỏi Git vì có thể tải hoặc tạo lại.
 
-Chạy đầy đủ ba mức tải 1, 3 và 5 request/s (180 giây cho mỗi mode ở mỗi mức):
+Chạy ma trận thí nghiệm ở 1, 3 và 5 request/giây:
 
 ```bash
 sh scripts/run_yolo_experiments.sh
 ```
 
-Toàn bộ ma trận mất khoảng 18 phút vì Edge và Cloud simulator được đo lần lượt.
-Kết quả nằm trong `results/yolo_rate01`, `results/yolo_rate03` và
-`results/yolo_rate05`. Lần đầu Ultralytics có thể tải trọng số từ mạng; hãy tải
-sẵn trước buổi demo.
+Script dùng `.venv-yolo/bin/python`, `yolov8n.pt` và `sample_images` theo mặc
+định. Có thể thay đổi bằng biến môi trường `PYTHON`, `MODEL` và `IMAGES`.
 
-Đường AWS hiện tại cũng đã dùng YOLOv8n thật. Build và triển khai Lambda container:
+## 4. Triển khai và chạy trên AWS
+
+Trước khi chạy, cần cấu hình AWS CLI profile, Docker daemon và quyền IAM. Lệnh
+sau build Lambda container ARM64, push lên ECR và deploy CloudFormation:
 
 ```bash
-AWS_PROFILE=nt2204-new AWS_REGION=ap-southeast-1 sh aws/deploy_yolo_cloud.sh
+AWS_PROFILE=nt2204-new \
+AWS_REGION=ap-southeast-1 \
+sh aws/deploy_yolo_cloud.sh
 ```
 
-Số liệu AWS YOLOv8n nằm trong `results/aws_yolo_rate01.csv`,
-`results/aws_yolo_rate03.csv`, `results/aws_yolo_rate05.csv` và được tách khỏi kết
-quả simulator. Xem bảng/hình đã tổng hợp tại
-`report/YOLOV8_RESULTS_AND_SLIDES.md`.
+Gửi ảnh và chạy Step Functions thật:
 
-## Giới hạn cần ghi trong báo cáo
+```bash
+AWS_PROFILE=nt2204-new \
+python3 aws/run_cloud_demo.py \
+  --region ap-southeast-1 \
+  --images sample_images \
+  --requests 20 \
+  --rate 2
+```
 
-- `success_rate=100%` nghĩa là xử lý đủ request, **không phải** YOLO chính xác 100%.
-- Cloud mode cục bộ mô phỏng network/Step Functions bằng độ trễ cấu hình được.
-- Greengrass IPC là local inter-process communication; không đồng nghĩa chia sẻ
-  cùng vùng nhớ giữa hai Lambda.
-- Network byte trong mô phỏng là byte payload ở tầng ứng dụng, không gồm TLS/IP.
-# NT2204
+Xóa tài nguyên sau khi demo để tránh phát sinh chi phí:
+
+```bash
+AWS_PROFILE=nt2204-new AWS_REGION=ap-southeast-1 sh aws/cleanup_cloud.sh
+```
+
+Hướng dẫn chi tiết về AWS Console nằm trong `aws/AWS_CONSOLE_DEMO.md`; ghi chú
+triển khai Greengrass nằm trong `aws/greengrass/README.md`.
+
+## Cấu trúc chính
+
+```text
+edge_demo/     CLI, detector và bộ điều phối Edge/Cloud mô phỏng
+aws/           CloudFormation, Lambda, Step Functions và script AWS
+scripts/       Script chạy ma trận benchmark YOLOv8
+sample_images/ Ảnh đầu vào mẫu
+tests/         Unit test
+report/        Nội dung và hình ảnh phục vụ báo cáo
+results/       Kết quả sinh khi chạy (không đưa lên Git)
+```
+
+## Lưu ý khi đọc kết quả
+
+- `success_rate=100%` chỉ có nghĩa là xử lý đủ request, không phải YOLO chính xác
+  100%.
+- Cloud mode local mô phỏng độ trễ mạng và Step Functions; không phải số đo AWS
+  thực tế.
+- Network I/O trong mô phỏng là payload ở tầng ứng dụng, chưa gồm TLS/IP.
+- Không commit AWS credentials, `.env`, certificate, private key, model hoặc kết
+  quả benchmark. Dùng biến môi trường hoặc AWS profile cho thông tin nhạy cảm.
